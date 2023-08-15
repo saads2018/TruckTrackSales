@@ -1,0 +1,605 @@
+﻿@page "/driversResults/{searchInput}"
+@using Microsoft.AspNetCore.Identity
+@using System.Text
+@using System.Security.Cryptography
+@using Microsoft.AspNetCore.SignalR.Client
+@using System.Net
+@using Newtonsoft.Json
+@using TruckTrack.Data
+@using TruckTrack.Models
+@inject ApplicationDbContext dbContext;
+@inject IJSRuntime jsRunTime;
+@inject SignInManager<AdvancedUser> _signInManager;
+@inject AuthenticationStateProvider authenticate;
+@inject NavigationManager nav;
+@inject IConfiguration config;
+
+@code
+{
+    [Parameter]
+    public string? searchInput { get; set; }
+
+    public List<string>? timeList { get; set; }
+    public List<bool>? completed { get; set; }
+    public string? times { get; set; }
+    public List<Delivery> searchList { get; set; }
+    public List<string> custList;
+    public List<Customer> customers { get; set; }
+    public string time { get; set; }
+    public int truckLocation { get; set; }
+    public string input { get; set; }
+    public string inputAddress { get; set; }
+    private HubConnection hubConnection;
+    private const int itemsDisplayed = 11;
+
+    protected override Task OnInitializedAsync() 
+    {
+        completed = new List<bool>();
+        timeList = new List<string>();
+
+        times = "";
+
+        try
+        {
+            if (!(searchInput == "Not Found!"))
+            {
+                truckLocation = 0;
+                customers = new List<Customer>();
+
+                var hubUrl = config.GetValue<string>("SignalIRLink");
+                hubConnection = new HubConnectionBuilder()
+                .WithUrl(hubUrl)
+                .Build();
+
+                hubConnection.On("ReceiveMessage", () =>
+                {
+                    HandleDatabaseChange();
+                });
+
+                hubConnection.StartAsync();
+
+                if (searchInput.StartsWith("Id"))
+                {
+                    searchInput = searchInput.Replace("Id", "");
+                    customers = dbContext.customersList.Where(x => x.CustId == Int32.Parse(searchInput)).ToList();
+                    input = customers.FirstOrDefault().BusinessName;
+                    inputAddress = customers.FirstOrDefault().Address1;
+                }
+                else
+                {
+                    searchInput = searchInput.Replace("Route", "");
+                    if (searchInput == "ALL")
+                        customers = dbContext.customersList.ToList();
+                    else
+                    {
+                        searchInput = dbContext.customersList.Where(x => x.CustId == Int32.Parse(searchInput)).FirstOrDefault().Route;
+                        customers = dbContext.customersList.ToList().Where(x => x.Route != null && x.Route.Trim().ToLower().StartsWith(searchInput.Trim().ToLower())).ToList();
+                    }
+                    input = searchInput;
+                }
+
+                searchList = dbContext.deliveriesList.ToList().Where(x => customers.Any(y => y.BusinessName != null && x.DeliveryRoutes.Contains(y.BusinessName))).ToList();
+                searchList = searchList.OrderBy(x => !x.DeliveryStatus.StartsWith("Ended")).ToList();
+            }
+        }
+        catch
+        {
+            searchInput = "Not Found!";
+        }
+
+        return base.OnInitializedAsync();
+    }
+
+    protected override Task OnAfterRenderAsync(bool firstRender)
+    {
+        if(firstRender)
+            jsRunTime.InvokeVoidAsync("addBackOut");
+        return base.OnAfterRenderAsync(firstRender);
+    }
+
+    private async Task openMap(Delivery delivery)
+    {
+        await jsRunTime.InvokeVoidAsync("showPopUpMap",delivery.Coordinates,delivery.CoordinateTimes,delivery.CoordinateSpeeds);
+    }
+
+    public string Image = "";
+
+    private async Task openImage()
+    {
+        await jsRunTime.InvokeVoidAsync("openInNewTab", Image);
+        //nav.NavigateTo(nav.Uri, forceLoad: true);
+    }
+
+    private async Task openImg(int id,string customer, string address)
+    {
+        var custList = searchList.Where(x => x.DeliveryId == id).FirstOrDefault();
+        string img = "";
+
+
+        if (custList.Invoices != null)
+        {
+            var routes = custList.DeliveryRoutes.Trim().Substring(0, custList.DeliveryRoutes.LastIndexOf(":")).Split(':').ToList();
+            var addressList = custList.RouteAddresses.Trim().Substring(0, custList.RouteAddresses.LastIndexOf(":")).Split(':').ToList();
+            if (custList.Invoices[getCustIndex(custList, customer, address)]!="none")
+                img = custList.Invoices[getCustIndex(custList,customer,address)];
+        }
+        Image = img;
+        await jsRunTime.InvokeVoidAsync("showPopUp", img);
+    }
+
+    private int getCustIndex(Delivery custList,string customer, string address)
+    {
+        int index = -1;
+        var routes = custList.DeliveryRoutes.Trim().Substring(0, custList.DeliveryRoutes.LastIndexOf(":")).Split(':').ToList();
+        var addressList = custList.RouteAddresses.Trim().Substring(0, custList.RouteAddresses.LastIndexOf(":")).Split(':').ToList();
+        for (int i = 0; i < routes.Count; i++)
+        {
+            if (routes[i].Trim().ToLower() == customer.Trim().ToLower() && addressList[i].Trim().ToLower() == address.Trim().ToLower())
+                index = i;
+        }
+        return index;
+    }
+
+    private async Task HandleDatabaseChange()
+    {
+        await jsRunTime.InvokeVoidAsync("location.reload");
+    }
+
+    private static readonly byte[] Key = Encoding.UTF8.GetBytes("yourIV1234567890"); // 16, 24, or 32 bytes key for AES-128, AES-192, or AES-256
+    private static readonly byte[] IV = Encoding.UTF8.GetBytes("yourIV1234567890"); // 16 bytes IV
+
+    public static string Decrypt(string encryptedText)
+    {
+        try
+        {
+            using (var aes = Aes.Create())
+            {
+                aes.Key = Key;
+                aes.IV = IV;
+
+                var decryptor = aes.CreateDecryptor(aes.Key, aes.IV);
+                var encryptedBytes = Convert.FromBase64String(encryptedText);
+
+                using (var memoryStream = new MemoryStream(encryptedBytes))
+                {
+                    using (var cryptoStream = new CryptoStream(memoryStream, decryptor, CryptoStreamMode.Read))
+                    {
+                        using (var streamReader = new StreamReader(cryptoStream))
+                        {
+                            var decryptedText = streamReader.ReadToEnd();
+                            return decryptedText;
+                        }
+                    }
+                }
+            }
+        }
+        catch{
+            return "Not Found!";
+        }
+
+    }
+
+    public class Address 
+    {
+        public string amenity { get; set; }
+        public string road { get; set; }
+        public string neighbourhood { get; set; }
+        public string suburb { get; set; }
+        public string city { get; set; }
+        public string state { get; set; }
+        public string postcode { get; set; }
+        public string country { get; set; }
+        public string country_code { get; set; }
+    }
+    public class NominatimResponse
+    {
+        public Address address { get; set; }
+    }
+
+    public string GetLocationNameFromCoordinates(double latitude, double longitude)
+    {
+        string apiUrl = $"https://nominatim.openstreetmap.org/reverse?format=json&lat={latitude}&lon={longitude}";
+
+        using (WebClient wc = new WebClient())
+        {
+            try
+            {
+                wc.Headers.Add("User-Agent", "locationName"); 
+                string jsonResult = wc.DownloadString(apiUrl);
+
+                NominatimResponse response = JsonConvert.DeserializeObject<NominatimResponse>(jsonResult);
+
+                if (response!=null)
+                {
+                    string locationName = response.address.road + ", " + response.address.city + ", " + response.address.state + ", " + response.address.country;
+                    return locationName;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("An error occurred while retrieving location: " + ex.Message);
+            }
+        }
+
+        return null;
+    }
+
+    public string GetLocation(Delivery delivery)
+    {
+        string location = "";
+        if (delivery.Coordinates != null)
+            location = delivery.Coordinates[delivery.Coordinates.Length - 1].X.ToString() + ", " + delivery.Coordinates[delivery.Coordinates.Length - 1].Y.ToString();
+        //location = GetLocationNameFromCoordinates(delivery.Coordinates[delivery.Coordinates.Length - 1].X, delivery.Coordinates[delivery.Coordinates.Length - 1].Y);
+
+        return location;
+    }
+
+    private System.Timers.Timer timer;
+    private int elapsedTime;
+
+    private void StartTimer()
+    {
+        // Initialize and start the timer
+        timer = new System.Timers.Timer(1000); // 1000 ms = 1 second interval
+        timer.Elapsed += TimerElapsed;
+        timer.AutoReset = true;
+        timer.Start();
+    }
+
+    public void Dispose()
+    {
+        StopTimer();
+    }
+
+    private void StopTimer()
+    {
+        // Stop and dispose of the timer
+        if (timer != null)
+        {
+            timer.Stop();
+            timer.Dispose();
+            elapsedTime = 0;
+            currentTime= "";
+            currentID = 0;
+        }
+    }
+
+    string currentTime = "";
+    int currentID = 0;
+
+    private void TimerElapsed(object sender, System.Timers.ElapsedEventArgs e)
+    {
+        // Update elapsed time on each timer tick
+        elapsedTime++;
+        DateTime parsedDateTime;
+        var x = DateTime.TryParseExact(currentTime, "HH:mm", null, System.Globalization.DateTimeStyles.None, out parsedDateTime);
+        var y = DateTime.Now - parsedDateTime;
+
+        if(y.TotalSeconds>20)
+        {
+            string [] atLocation = new string[2];
+            atLocation[0] = "None";
+            atLocation[1] = "false";
+
+            dbContext.deliveriesList.Where(x => x.DeliveryId == currentID).FirstOrDefault().AtLocation = atLocation;
+            dbContext.SaveChanges();
+            Dispose();
+            jsRunTime.InvokeVoidAsync("reload");
+        }
+        InvokeAsync(StateHasChanged);
+    }
+
+    private string getName(string name, int length=8)
+    {
+        name = name.Trim();
+        if (name.Length > length)
+            name = name.Substring(0, length) + "...";
+
+        return name;
+    }
+
+    public bool checkIfCompleted(Delivery delivery,string route)
+    {
+        time = "";
+        bool complete = false;
+
+        if(delivery.DeliveryTimes!=null && times.Contains(route+":"))
+        {
+            time = times.Substring(times.IndexOf(":")+1);
+            time = time.Substring(0,5);
+            timeList.Add(time);
+            complete = true;
+            times = times.Substring(times.IndexOf(':') + 7);
+        }
+        return complete;
+    }
+}
+
+<PageTitle>Drivers Page</PageTitle>
+
+
+<style>
+    ::-webkit-scrollbar {
+        width: 12px;
+        height:10px;
+    }
+
+    ::-webkit-scrollbar-track {
+        border-radius: 8px;
+        background-color: lightgray;
+    }
+
+    ::-webkit-scrollbar-thumb {
+        border-radius: 8px;
+        background-color: lightgray;
+    }
+
+    .popup-dialog {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background-color: white;
+    padding: 20px;
+    border: 1px solid #ccc;
+    cursor:pointer;
+    z-index:9998;
+}
+</style>
+
+<AuthorizeView>
+    <Authorized>
+    
+            @if (_signInManager.IsSignedIn(context.User) && (dbContext.Users.Where(x => x.UserName == context.User.Identity.Name).FirstOrDefault().Admin == true || dbContext.Users.Where(x => x.UserName == context.User.Identity.Name).FirstOrDefault().SalesPerson == true))
+            {
+                @if (searchInput == "Not Found!")
+                {
+                    <p>
+                        Sorry, there's nothing at this address.
+                    </p>
+                }
+                else
+                {
+                    <div class="container" style="margin-top:-3%;  display:flex;">
+                        <div style=" display:flex; position:fixed; z-index:3; left:60px;">
+                            <p id="backPage" style="cursor:pointer;" @onclick="@(e=>nav.NavigateTo("/driverTrack"))">
+                                Back
+                            </p>
+                        </div>
+                        <div style=" display:flex; position:fixed; z-index:3; right:60px;">
+                            <p>Today</p>
+                            <p style="margin-left:20px;">@getName(input,48)</p>
+                            <form id="myForm" method="post" action="Identity/Account/LogOut">
+                                <p onclick="document.getElementById('myForm').submit();" style="cursor:pointer; margin-left:20px;">Logout</p>
+                            </form>
+                        </div>
+                    </div>
+
+                    <div id="popup" style="display:none; background-color:black; width:100%; left:0px; right:0px; top:0px; position:fixed; height:100%; z-index:4;">
+                        <div id="popup-dialog" @onclick="@(e=>openImage())" class="popup-dialog">
+                            <img id="invoiceImage" height="600" width="600" src="" />
+                        </div>
+                    </div>    
+
+                     <div id="popup1" style="display:none; background-color:black; width:100%; left:0px; right:0px; top:0px; position:fixed; height:100%; z-index:4;">
+                        <div id="popup-dialog1" class="popup-dialog" style="width:1300px; height: 700px;">
+                        </div>
+                    </div>
+
+
+                    @foreach (var delivery in searchList)
+                    {
+                        custList = new List<string>();
+                        completed = new List<bool>();
+                        timeList = new List<string>();
+                        times = delivery.DeliveryTimes;
+                        custList = delivery.DeliveryRoutes.Trim().Substring(0, delivery.DeliveryRoutes.LastIndexOf(":")).Split(':').ToList();
+                        var addressList = delivery.RouteAddresses.Trim().Substring(0, delivery.RouteAddresses.LastIndexOf(":")).Split(':').ToList();
+                        truckLocation = 0;
+                        var percentDone = 0.0;
+                        var count = 0.0;
+                        var increment = 0;
+
+                        @foreach (var route in custList)
+                        {
+                            var routeMod = getName(route);
+                            if (checkIfCompleted(delivery, route))
+                            {
+                                if (increment == (itemsDisplayed - 1))
+                                {
+                                    truckLocation = 0;
+                                    increment = -1;
+                                }
+                                else
+                                    truckLocation += (90 + (routeMod?.Length > 8 ? 11 * (routeMod.Length - 8) : 0));
+                                count += 1;
+                                increment += 1;
+                                completed.Add(true);
+                            }
+                            else
+                            {
+                                timeList.Add("");
+                                completed.Add(false);
+                            }
+                    }
+                    //truckLocation += 70;
+                    percentDone = Math.Round(100 * (count / custList.Count), 2);
+                    var status = delivery.DeliveryStatus;
+                    var pic = "profile.png";
+                    var picCheck = dbContext.Users.ToList().Where(x => x.UserName == delivery.DriverUserName).FirstOrDefault().Picture;
+                    var statusColor = "red";
+                    if (status=="Ended")
+                            statusColor = "green";
+                        if (!String.IsNullOrWhiteSpace(picCheck))
+                            pic = $"data:image/png;base64,{picCheck}";
+                        <div id="driverCard" class="card list-group-item" style="width:1450px; padding:0px; border-width:0px; margin-top:3%; margin-bottom:1%;">
+
+                            <div style="margin-top:10px; padding:10px; ">
+
+                                <br />
+
+                                @if (count == custList.Count)
+                                {
+                                    custList.Add("TRUCK64234303490");
+                                    completed.Add(false);
+                                    addressList.Add("TRUCK64234303490");
+                                    timeList.Add("");
+                                }
+                                else
+                                {
+                                    var insert = "TRUCK64234303490";
+                                    if(delivery.AtLocation[1]=="true")
+                                    {
+                                        var atLocationIndex = getCustIndex(delivery, delivery.AtLocation[0].Substring(0, delivery.AtLocation[0].IndexOf(":")), delivery.AtLocation[0].Substring(delivery.AtLocation[0].IndexOf(":") + 1));
+                                        insert = "TRUCK14234303490";
+                                        custList.RemoveAt(atLocationIndex);
+                                        addressList.RemoveAt(atLocationIndex);
+                                    currentTime = delivery.DeliveryTimes.Substring(delivery.DeliveryTimes.Length - 6,5);
+                                    currentID = delivery.DeliveryId;
+                                    //StartTimer();
+                                }
+                                     custList.Insert((int)count, insert);
+                                    addressList.Insert((int)count, insert);
+                                    completed.Insert((int)count, false);
+                                    timeList.Insert((int)count, "");
+                                }
+
+                                @{
+                                    var counter = 0;
+                                    var remainder = 0;
+                                    int j = 0;
+                                    var total = custList.Count;
+
+                                    if (custList.Count <= itemsDisplayed)
+                                        counter = 1;
+                                    else
+                                    {
+                                        if (custList.Count % itemsDisplayed == 0)
+                                            counter = custList.Count / itemsDisplayed;
+                                        else
+                                            counter = (custList.Count / itemsDisplayed) + 1;
+                                    }
+                                }
+                                @for (int i = 0; i < counter; i++)
+                                {
+                                    remainder = (total - itemsDisplayed >= 0 ? itemsDisplayed : total) + j;
+                                    total = total - itemsDisplayed >= 0 ? total - itemsDisplayed : 0;
+                                    var tempCustList = custList.GetRange(j, remainder - j);
+                                    var location = GetLocation(delivery);
+                                    var displayNone = "";
+                                    if(String.IsNullOrWhiteSpace(location))
+                                    {
+                                        displayNone = "Not Yet Started";
+                                    }
+                                    else if(delivery.DeliveryStatus=="Ended")
+                                    {
+                                      displayNone = "Journey Ended";
+                                    }
+
+                                @if (tempCustList.Where(x => x == "TRUCK64234303490" || x == "TRUCK14234303490").FirstOrDefault() != null)
+                                    {
+                                        <div id="profileDets" style="margin-left:@(truckLocation)px; width:350px; display:flex;">
+                                            <img  style="border-radius:50px;" height="85" width="85" src="@pic" />
+                                            <div style="font-size:small; margin-left:10px; height:40px; margin-top:2px;">
+                                                <label style="color:gray">@delivery.DeliveryDriver</label>
+                                                <br />
+
+                                                <label style="color:gray;">Current Location: @displayNone
+                                                @if(delivery.DeliveryStatus!="Ended")
+                                                {
+                                                    <a target="_blank" href="https://www.google.com/maps/place/@location">@GetLocation(delivery)</a>
+
+                                                }
+                                                </label>
+                                                <br>
+                                                <label style="color:gray">Ph: @dbContext.Users.ToList().Where(x=>x.UserName==delivery.DriverUserName).FirstOrDefault()?.PhoneNumber</label>
+                                                <br />
+                                                <label>@percentDone%</label>
+                                            </div>
+                                        </div>
+                                    }
+
+                                    <div style="display:flex;">
+
+                                        @for (; j < remainder; j++)
+                                        {
+                                            var colorBox = "#ddc6f4";
+                                            var colorFont = "black";
+                                            var searched = false;
+
+                                            if (customers.Any(x => x.BusinessName == custList[j] && x.Address1 == addressList[j]))
+                                            {
+                                                colorBox = "#4e4773";
+                                                colorFont = "white";
+                                                searched = true;
+                                            }
+                                            else if (custList[j] != "TRUCK64234303490" && completed[j] == true)
+                                            {
+                                                colorBox = "#f1eff0";
+                                                colorFont = "#b2aead";
+                                            }
+
+                                            var routeMod = getName(custList[j]);
+                                            var width = 115 + (routeMod?.Length > 8 ? 11 * (routeMod.Length - 8) : 0);
+                                            string customer = custList[j]; 
+                                            string address = addressList[j];
+                                            string tooltip = customer + "\n" + address;
+
+                                            
+                                            //Truck Itself
+                                            @if (custList[j] == "TRUCK64234303490")
+                                            {
+                                                <div style="margin-left:10px; margin-top:30px;">
+                                                    <img @onclick="@(e=>openMap(delivery))" id="truck" style="cursor:pointer; margin-top:-20px;" height="70" width="120" src="truck.png" />
+                                                 </div>
+                                            }
+                                            else if (custList[j] == "TRUCK14234303490")
+                                            {
+                                                //Truck At Location
+                                                var routesTemp = delivery.DeliveryRoutes.Trim().Substring(0, delivery.DeliveryRoutes.LastIndexOf(":")).Split(':').ToList();
+                                                var addressListTemp = delivery.RouteAddresses.Trim().Substring(0, delivery.RouteAddresses.LastIndexOf(":")).Split(':').ToList();
+                                                var atLocationIndex = getCustIndex(delivery, delivery.AtLocation[0].Substring(0, delivery.AtLocation[0].IndexOf(":")), delivery.AtLocation[0].Substring(delivery.AtLocation[0].IndexOf(":") + 1));
+                                                routeMod = getName(routesTemp[atLocationIndex]);
+                                                customer = routesTemp[j];
+                                                address = addressListTemp[j];
+                                                tooltip = customer + "\n" + address;
+
+                                                <div style="margin-left:10px; margin-top:30px; position:relative;">
+                                                    <img @onclick="@(e=>openMap(delivery))" id="truck" style="cursor:pointer; margin-top:-20px;" height="70" width="120" src="truck.png" />
+                                                    <div @onclick="@(e=>openImg(delivery.DeliveryId,customer,address))" style="z-index:1; position:absolute; top:0px; left:0px; cursor:pointer;">
+                                                    <div title="@tooltip" data-toggle="tooltip" data-placement="bottom" lacement style="background-color:white; color:black; font-weight:lighter; border:3px solid #ddc6f4; padding:10px; text-align:center; width:@(width-35)px;height:47px; font-size:14px;">@routeMod</div>
+                                                    </div>
+                                                 </div>
+                                            }
+                                            else
+                                            {
+                                                //Route Completed
+                                                 <div @onclick="@(e=>openImg(delivery.DeliveryId, customer,address))" style="cursor:pointer;margin-top:30px;  margin-left:10px;">
+                                                        <div title="@tooltip" data-toggle="tooltip" data-placement="bottom" lacement style="background-color:@colorBox; color:@colorFont; font-weight:lighter; padding:10px; text-align:center; width:@(width-35)px; height:47px; font-size:14px;">@routeMod</div>
+                                                        <label style="font-size:13px; margin-left:@((width-45)/2 -18)px">@timeList[j]</label>
+                                                    </div>
+                                            }
+
+                                            counter++;
+
+
+                                        }
+                                    </div>
+                                }
+
+                            </div>
+                        </div>
+                    }
+                }
+
+            }
+            else
+            {
+                <p>You must be logged in as an admin or sales person to view this page.</p>
+            }
+    </Authorized>
+    <NotAuthorized>
+        <p>You must be logged in to view this page.</p>
+    </NotAuthorized>
+</AuthorizeView>
+
